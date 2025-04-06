@@ -113,3 +113,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Google Gemini AI
 - SHL for assessment catalog
 - Streamlit for the amazing UI framework 
+
+## Github Repo
+
+https://github.com/aakashsharma7/SHL-Assessment-Recommendation-System

@@ -23,13 +23,13 @@ Built a Streamlit-based web application that:
 
 ## Implementation Highlights
 
--- Input Handling:
+--- Input Handling:
 
 - Text input via text area
 - URL input with web scraping
 - Input validation and sanitization
 
--- AI Processing:
+--- AI Processing:
 
 - Gemini Pro model integration
 - Structured prompt engineering

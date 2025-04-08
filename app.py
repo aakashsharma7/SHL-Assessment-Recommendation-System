@@ -16,7 +16,7 @@ API_TIMEOUT = 30  # seconds
 MAX_RETRIES = 3
 SHL_BASE_URL = "https://www.shl.com"
 
-genai.configure(api_key="AIzaSyAr8TJOiua07BEox_KrlgQ6QoZXJaKhL2I")# my api
+genai.configure(api_key="AIzaSyA9gsxTV3Sd81-rlSBLbFcXgE9QjuPHZ6c")# my api
 
 @st.cache_data
 def load_catalog_data():

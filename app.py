@@ -18,8 +18,8 @@ import os
 API_TIMEOUT = 30  # seconds
 MAX_RETRIES = 3  # Reduced retries to avoid excessive waiting
 SHL_BASE_URL = "https://www.shl.com"
-BASE_DELAY = 30  # Increased base delay
-MAX_DELAY = 120  # Increased maximum delay
+BASE_DELAY = 5  # Reduced base delay from 30 to 5 seconds
+MAX_DELAY = 20  # Reduced maximum delay from 120 to 20 seconds
 
 # Rate limiting configuration
 RATE_LIMIT_WINDOW = 60  # 1 minute window
@@ -166,7 +166,13 @@ def make_api_request(model, prompt):
         wait_time = RATE_LIMIT_WINDOW - (datetime.now() - request_timestamps[0]).total_seconds()
         if wait_time > 0:
             st.warning(f"⚠️ Rate limit reached. Please wait {wait_time:.1f} seconds before trying again.")
-            time.sleep(wait_time)
+            
+            # Add a progress bar for the wait time
+            progress_bar = st.progress(0)
+            for i in range(100):
+                time.sleep(wait_time / 100)
+                progress_bar.progress(i + 1)
+            
             request_timestamps.clear()  # Clear the timestamps after waiting
     
     last_error = None
@@ -175,7 +181,10 @@ def make_api_request(model, prompt):
             # Record the request timestamp
             request_timestamps.append(datetime.now())
             
-            response = model.generate_content(prompt)
+            # Show a spinner during API request
+            with st.spinner(f"Making API request (Attempt {attempt + 1}/{MAX_RETRIES})..."):
+                response = model.generate_content(prompt)
+            
             if response and response.text:
                 try:
                     # Clean and validate the response
@@ -201,13 +210,25 @@ def make_api_request(model, prompt):
                     if attempt < MAX_RETRIES - 1:
                         delay = calculate_backoff_delay(attempt)
                         st.warning(f"⚠️ Invalid JSON format. Retrying in {delay:.1f} seconds... (Attempt {attempt + 1}/{MAX_RETRIES})")
-                        time.sleep(delay)
+                        
+                        # Add a progress bar for the delay
+                        progress_bar = st.progress(0)
+                        for i in range(100):
+                            time.sleep(delay / 100)
+                            progress_bar.progress(i + 1)
+                        
                         continue
                 except Exception as e:
                     if attempt < MAX_RETRIES - 1:
                         delay = calculate_backoff_delay(attempt)
                         st.warning(f"⚠️ Response validation failed. Retrying in {delay:.1f} seconds... (Attempt {attempt + 1}/{MAX_RETRIES})")
-                        time.sleep(delay)
+                        
+                        # Add a progress bar for the delay
+                        progress_bar = st.progress(0)
+                        for i in range(100):
+                            time.sleep(delay / 100)
+                            progress_bar.progress(i + 1)
+                        
                         continue
             return None
         except Exception as e:
@@ -217,7 +238,13 @@ def make_api_request(model, prompt):
                 if attempt < MAX_RETRIES - 1:
                     delay = calculate_backoff_delay(attempt)
                     st.warning(f"⚠️ Rate limit reached. Waiting {delay:.1f} seconds... (Attempt {attempt + 1}/{MAX_RETRIES})")
-                    time.sleep(delay)
+                    
+                    # Add a progress bar for the delay
+                    progress_bar = st.progress(0)
+                    for i in range(100):
+                        time.sleep(delay / 100)
+                        progress_bar.progress(i + 1)
+                    
                     continue
             break
     

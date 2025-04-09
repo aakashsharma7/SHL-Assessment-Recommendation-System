@@ -10,13 +10,61 @@ import re
 import urllib.parse
 from urllib.parse import urlparse
 import time
+import random
+from datetime import datetime, timedelta
+import os
 
 # API Configuration
 API_TIMEOUT = 30  # seconds
-MAX_RETRIES = 3
+MAX_RETRIES = 3  # Reduced retries to avoid excessive waiting
 SHL_BASE_URL = "https://www.shl.com"
+BASE_DELAY = 30  # Increased base delay
+MAX_DELAY = 120  # Increased maximum delay
 
-genai.configure(api_key="AIzaSyCQtd3mHagegGMfne_G7RMAvR5QMuGe7BU")# my api
+# Rate limiting configuration
+RATE_LIMIT_WINDOW = 60  # 1 minute window
+MAX_REQUESTS_PER_WINDOW = 10  # Maximum requests per minute
+
+# Configure API with rate limiting
+# Get API key from environment variable
+api_key = os.environ.get("GEMINI_API_KEY")
+if not api_key:
+    st.error("⚠️ GEMINI_API_KEY environment variable not set. Please set it before running the app.")
+    st.info("""
+    To set the API key:
+    
+    **Windows (PowerShell):**
+    ```
+    $env:GEMINI_API_KEY = "your_api_key"
+    ```
+    
+    **Windows (Command Prompt):**
+    ```
+    set GEMINI_API_KEY=your_api_key
+    ```
+    
+    **Linux/Mac:**
+    ```
+    export GEMINI_API_KEY=your_api_key
+    ```
+    
+    **For permanent setup:**
+    1. Press Windows + R
+    2. Type `sysdm.cpl` and press Enter
+    3. Click on "Advanced" tab
+    4. Click "Environment Variables"
+    5. Under "User variables", click "New"
+    6. Variable name: `GEMINI_API_KEY`
+    7. Variable value: your API key
+    8. Click OK on all windows
+    9. Restart your terminal/IDE
+    """)
+    st.stop()
+else:
+    genai.configure(api_key=api_key)
+
+# Rate limiting state
+request_timestamps = []
 
 @st.cache_data
 def load_catalog_data():
@@ -41,7 +89,44 @@ def check_api_reachability():
         response = model.generate_content("Test")
         return True
     except Exception as e:
-        st.error(f"API Unreachable: {str(e)}")
+        error_message = str(e)
+        if "API_KEY_INVALID" in error_message or "API Key not found" in error_message:
+            st.error("⚠️ Invalid API Key: The Gemini API key is invalid or not properly configured.")
+            st.info("""
+            To fix this issue:
+            1. Get a valid API key from Google AI Studio (https://makersuite.google.com/app/apikey)
+            2. Set the API key as an environment variable:
+            
+               **Windows (PowerShell):**
+               ```
+               $env:GEMINI_API_KEY = "your_api_key"
+               ```
+               
+               **Windows (Command Prompt):**
+               ```
+               set GEMINI_API_KEY=your_api_key
+               ```
+               
+               **Linux/Mac:**
+               ```
+               export GEMINI_API_KEY=your_api_key
+               ```
+               
+               **For permanent setup:**
+               1. Press Windows + R
+               2. Type `sysdm.cpl` and press Enter
+               3. Click on "Advanced" tab
+               4. Click "Environment Variables"
+               5. Under "User variables", click "New"
+               6. Variable name: `GEMINI_API_KEY`
+               7. Variable value: your API key
+               8. Click OK on all windows
+               9. Restart your terminal/IDE
+               
+            3. Restart the application
+            """)
+        else:
+            st.error(f"API Unreachable: {error_message}")
         return False
 
 def fetch_description(url):
@@ -62,41 +147,134 @@ def fetch_description(url):
         time.sleep(1)  # Wait before retry
     return ""
 
+def is_rate_limited():
+    """Check if we're currently rate limited"""
+    current_time = datetime.now()
+    # Remove timestamps older than the window
+    request_timestamps[:] = [ts for ts in request_timestamps 
+                           if current_time - ts < timedelta(seconds=RATE_LIMIT_WINDOW)]
+    return len(request_timestamps) >= MAX_REQUESTS_PER_WINDOW
+
+def calculate_backoff_delay(attempt):
+    """Calculate exponential backoff delay with jitter"""
+    delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
+    jitter = random.uniform(0, 0.1 * delay)  # Add 0-10% jitter
+    return delay + jitter
+
+def make_api_request(model, prompt):
+    if is_rate_limited():
+        wait_time = RATE_LIMIT_WINDOW - (datetime.now() - request_timestamps[0]).total_seconds()
+        if wait_time > 0:
+            st.warning(f"⚠️ Rate limit reached. Please wait {wait_time:.1f} seconds before trying again.")
+            time.sleep(wait_time)
+            request_timestamps.clear()  # Clear the timestamps after waiting
+    
+    last_error = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Record the request timestamp
+            request_timestamps.append(datetime.now())
+            
+            response = model.generate_content(prompt)
+            if response and response.text:
+                try:
+                    # Clean and validate the response
+                    cleaned_text = response.text.strip()
+                    # Try to parse as complete JSON object first
+                    try:
+                        data = json.loads(cleaned_text)
+                        if isinstance(data, dict) and 'data' in data:
+                            return cleaned_text
+                    except json.JSONDecodeError:
+                        pass
+                    
+                    # Try to extract JSON array if direct parsing fails
+                    match = re.search(r'\[\s*{.*?}\s*]', cleaned_text, re.DOTALL)
+                    if match:
+                        try:
+                            json.loads(match.group())  # Validate the extracted JSON
+                            return cleaned_text
+                        except json.JSONDecodeError:
+                            pass
+                    
+                    # If we get here, the response is not valid JSON
+                    if attempt < MAX_RETRIES - 1:
+                        delay = calculate_backoff_delay(attempt)
+                        st.warning(f"⚠️ Invalid JSON format. Retrying in {delay:.1f} seconds... (Attempt {attempt + 1}/{MAX_RETRIES})")
+                        time.sleep(delay)
+                        continue
+                except Exception as e:
+                    if attempt < MAX_RETRIES - 1:
+                        delay = calculate_backoff_delay(attempt)
+                        st.warning(f"⚠️ Response validation failed. Retrying in {delay:.1f} seconds... (Attempt {attempt + 1}/{MAX_RETRIES})")
+                        time.sleep(delay)
+                        continue
+            return None
+        except Exception as e:
+            last_error = e
+            error_msg = str(e)
+            if "quota exceeded" in error_msg.lower() or "429" in error_msg:
+                if attempt < MAX_RETRIES - 1:
+                    delay = calculate_backoff_delay(attempt)
+                    st.warning(f"⚠️ Rate limit reached. Waiting {delay:.1f} seconds... (Attempt {attempt + 1}/{MAX_RETRIES})")
+                    time.sleep(delay)
+                    continue
+            break
+    
+    if last_error:
+        error_msg = str(last_error)
+        if "quota exceeded" in error_msg.lower() or "429" in error_msg:
+            return {
+                "status": "error",
+                "message": "API rate limit exceeded. Please try again in a few minutes.",
+                "data": []
+            }
+        raise last_error
+    return None
+
 def get_assesment_recommendation(query):
-    if not check_api_reachability():
+    try:
+        model = genai.GenerativeModel("gemini-1.5-pro")
+        prompt = ("You are a helpful assistant. Based on the following job description, recommend up to 10 relevant SHL assessments.\n\n"
+        f"{query.strip()}\n\n"
+        "Your response MUST be a valid JSON object with the following structure:\n"
+        "{\n"
+        "  'status': 'success',\n"
+        "  'message': 'Recommendations generated successfully',\n"
+        "  'data': [\n"
+        "    {\n"
+        "      'assessment_name': 'string',\n"
+        "      'url': 'string (SHL catalog URL)',\n"
+        "      'remote_testing': 'Yes/No',\n"
+        "      'adaptive_support': 'Yes/No',\n"
+        "      'duration': 'string (e.g., 30 mins)',\n"
+        "      'test_type': 'string (e.g., Cognitive)'\n"
+        "    }\n"
+        "  ]\n"
+        "}\n\n"
+        "IMPORTANT: Respond ONLY with the JSON object, no additional text or explanation.")
+        
+        response_text = make_api_request(model, prompt)
+        if isinstance(response_text, dict):  # If it's already an error response
+            return response_text
+        if response_text:
+            return response_text
         return {
             "status": "error",
-            "message": "API Unreachable",
+            "message": "Failed to get valid JSON response after retries",
             "data": []
         }
-        
-    model = genai.GenerativeModel("gemini-1.5-pro")
-    prompt = ("You are a helpful assistant. Based on the following job description, recommend up to 10 relevant SHL assessments.\n\n"
-    f"{query.strip()}\n\n"
-    "Your response MUST be a valid JSON object with the following structure:\n"
-    "{\n"
-    "  'status': 'success',\n"
-    "  'message': 'Recommendations generated successfully',\n"
-    "  'data': [\n"
-    "    {\n"
-    "      'assessment_name': 'string',\n"
-    "      'url': 'string (SHL catalog URL)',\n"
-    "      'remote_testing': 'Yes/No',\n"
-    "      'adaptive_support': 'Yes/No',\n"
-    "      'duration': 'string (e.g., 30 mins)',\n"
-    "      'test_type': 'string (e.g., Cognitive)'\n"
-    "    }\n"
-    "  ]\n"
-    "}\n\n"
-    "Respond ONLY in this exact JSON format.")
-    
-    try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
     except Exception as e:
+        error_message = str(e)
+        if "quota exceeded" in error_message.lower() or "429" in error_message:
+            return {
+                "status": "error",
+                "message": "API rate limit exceeded. Please try again in a few minutes.",
+                "data": []
+            }
         return {
             "status": "error",
-            "message": f"Gemini API Error: {str(e)}",
+            "message": f"API Error: {error_message}",
             "data": []
         }
 
@@ -111,39 +289,62 @@ def validate_shl_url(url):
 def json_extraction(response_text):
     try:
         # First try to parse as complete JSON object
-        data = json.loads(response_text)
-        if isinstance(data, dict) and 'data' in data:
-            # Validate URLs in the response
-            for item in data['data']:
-                if 'url' in item and not validate_shl_url(item['url']):
-                    item['url'] = f"{SHL_BASE_URL}/solutions/products/product-catalog/"
-            return data
-        
-        # Fallback: Try to extract JSON array if response is not in correct format
-        match = re.search(r'\[\s*{.*?}\s*]', response_text, re.DOTALL)
-        if match:
-            items = json.loads(match.group())
-            formatted_data = {
-                "status": "success",
-                "message": "Recommendations generated successfully",
+        if not response_text or not isinstance(response_text, str):
+            return {
+                "status": "error",
+                "message": "Invalid response format",
                 "data": []
             }
-            for item in items:
-                formatted_item = {
-                    "assessment_name": item.get("Assessment Name", ""),
-                    "url": item.get("URL", f"{SHL_BASE_URL}/solutions/products/product-catalog/"),
-                    "remote_testing": item.get("Remote Testing Support", "No"),
-                    "adaptive_support": item.get("Adaptive/IRT Support", "No"),
-                    "duration": item.get("Duration", ""),
-                    "test_type": item.get("Test Type", "")
-                }
-                formatted_data["data"].append(formatted_item)
-            return formatted_data
+            
+        # Clean the response text
+        cleaned_text = response_text.strip()
+        if not cleaned_text:
+            return {
+                "status": "error",
+                "message": "Empty response received",
+                "data": []
+            }
+            
+        try:
+            data = json.loads(cleaned_text)
+            if isinstance(data, dict) and 'data' in data:
+                # Validate URLs in the response
+                for item in data['data']:
+                    if 'url' in item and not validate_shl_url(item['url']):
+                        item['url'] = f"{SHL_BASE_URL}/solutions/products/product-catalog/"
+                return data
+        except json.JSONDecodeError:
+            # If direct parsing fails, try to extract JSON array
+            match = re.search(r'\[\s*{.*?}\s*]', cleaned_text, re.DOTALL)
+            if match:
+                try:
+                    items = json.loads(match.group())
+                    formatted_data = {
+                        "status": "success",
+                        "message": "Recommendations generated successfully",
+                        "data": []
+                    }
+                    for item in items:
+                        formatted_item = {
+                            "assessment_name": item.get("Assessment Name", ""),
+                            "url": item.get("URL", f"{SHL_BASE_URL}/solutions/products/product-catalog/"),
+                            "remote_testing": item.get("Remote Testing Support", "No"),
+                            "adaptive_support": item.get("Adaptive/IRT Support", "No"),
+                            "duration": item.get("Duration", ""),
+                            "test_type": item.get("Test Type", "")
+                        }
+                        formatted_data["data"].append(formatted_item)
+                    return formatted_data
+                except json.JSONDecodeError as e:
+                    st.error(f"Failed to parse extracted JSON: {str(e)}")
+            else:
+                st.error("No valid JSON array found in response")
     except Exception as e:
         st.error(f"JSON parsing error: {str(e)}")
+    
     return {
         "status": "error",
-        "message": "Failed to parse response",
+        "message": "Failed to parse response. Please try again.",
         "data": []
     }
 
@@ -185,30 +386,44 @@ elif input_type == "Job Description URL":
         job_desc = fetch_description(job_url)
         
 if st.button("Recommend Assessments") and job_desc.strip():
+    if is_rate_limited():
+        st.error("⚠️ Rate limit reached. Please wait a moment before trying again.")
+        st.stop()
+        
     with st.spinner("Generating recommendations using Gemini..."):
-        raw_json = get_assesment_recommendation(job_desc)
-        
-        st.subheader("📦 Raw API Response")
-        st.code(raw_json, language="json")
-        
-        response_data = json_extraction(raw_json)
-        
-        if response_data["status"] == "success" and response_data["data"]:
-            st.subheader("📋 Recommended SHL Assessments")
-            # Convert the data to a format suitable for display
-            display_data = []
-            for item in response_data["data"]:
-                display_data.append({
-                    "Assessment Name": item["assessment_name"],
-                    "URL": item["url"],
-                    "Remote Testing": item["remote_testing"],
-                    "Adaptive Support": item["adaptive_support"],
-                    "Duration": item["duration"],
-                    "Test Type": item["test_type"]
-                })
-            st.table(pd.DataFrame(display_data))
-        else:
-            st.error(f"❌ {response_data['message']}")
+        try:
+            raw_json = get_assesment_recommendation(job_desc)
+            
+            if not raw_json:
+                st.error("❌ No response received from API")
+                st.stop()
+                
+            st.subheader("📦 Raw API Response")
+            st.code(raw_json, language="json")
+            
+            response_data = json_extraction(raw_json)
+            
+            if response_data["status"] == "success" and response_data["data"]:
+                st.subheader("📋 Recommended SHL Assessments")
+                display_data = []
+                for item in response_data["data"]:
+                    display_data.append({
+                        "Assessment Name": item["assessment_name"],
+                        "URL": item["url"],
+                        "Remote Testing": item["remote_testing"],
+                        "Adaptive Support": item["adaptive_support"],
+                        "Duration": item["duration"],
+                        "Test Type": item["test_type"]
+                    })
+                st.table(pd.DataFrame(display_data))
+            else:
+                st.error(f"❌ {response_data['message']}")
+                if "rate limit" in response_data['message'].lower():
+                    st.info("💡 Tip: Please wait a few minutes before trying again.")
+        except Exception as e:
+            st.error(f"An error occurred: {str(e)}")
+            if "quota exceeded" in str(e).lower() or "429" in str(e):
+                st.info("💡 Tip: The API has reached its rate limit. Please try again in a few minutes.")
 
 st.divider()
 st.subheader("🔍 API Status")
@@ -217,6 +432,8 @@ st.info(f"""
 - SHL Catalog: ✅ Accessible
 - URL Validation: ✅ Active
 - Response Format: ✅ Standardized
+- Rate Limiting: ✅ Enhanced with request tracking
+- Requests in last minute: {len(request_timestamps)}/{MAX_REQUESTS_PER_WINDOW}
 """)
 
 st.divider()

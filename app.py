@@ -72,7 +72,7 @@ def extract_raw_data(url):
 
 def fetch_descrption(url):
     try:
-        response= request.get(url)
+        response= requests.get(url)
         soup= BeautifulSoup(response.content, 'html.parser')
         return soup.get_text()
     except Exception as e:
